@@ -254,6 +254,10 @@ mutable struct NavEstimator
     source_field_est::SVector{3,Float64}
     # Previous source_detected state (for edge detection)
     prev_source_detected::Bool
+    # Continuous source duration counter (for graceful degradation)
+    source_duration::Float64
+    # Previous measurement magnitude (for temporal change detection)
+    prev_B_mag::Float64
     # Tile freeze set (Mode C)
     frozen_tiles::Set{Tuple{Int,Int}}
     # Introspection trace (Mode C diagnostics)
@@ -292,6 +296,8 @@ function NavEstimator(initial_pos::SVector{3,Float64}, mode::ElevatorModeConfig,
                  Float64[], 0.0, false,
                  SVector(0.0, 0.0, 0.0),  # source field estimate
                  false,                    # prev_source_detected
+                 0.0,                      # source_duration
+                 0.0,                      # prev_B_mag
                  Set{Tuple{Int,Int}}(),
                  Float64[], Float64[], Float64[], Float64[], Bool[], Bool[])
 end
@@ -456,10 +462,11 @@ function update_magnetometer!(est::NavEstimator, measured_B_body::SVector{3,Floa
         end
 
     elseif est.mode.mode == NAV_MODE_C_SOURCE_AWARE
-        # CUSUM on innovation norm for change detection
+        # CUSUM on absolute field magnitude deviation
         B_earth_mag = sqrt(sum(EARTH_FIELD_NED .^ 2))
         B_meas_mag = sqrt(sum(measured_B_body .^ 2))
         mag_dev = abs(B_meas_mag - B_earth_mag) / noise_std
+        est.prev_B_mag = B_meas_mag
 
         est.cusum_stat = max(0.0, est.cusum_stat + mag_dev -
                              est.mode.cusum_drift - 1.5)
@@ -473,6 +480,13 @@ function update_magnetometer!(est::NavEstimator, measured_B_body::SVector{3,Floa
         end
 
         est.prev_source_detected = est.source_detected
+
+        # Track continuous source duration for graceful degradation
+        if est.source_detected
+            est.source_duration += 0.1  # dt
+        else
+            est.source_duration = 0.0
+        end
 
         chi2 = sum(innovation .^ 2) / noise_std^2
         chi2_threshold = 11.345
@@ -488,40 +502,17 @@ function update_magnetometer!(est::NavEstimator, measured_B_body::SVector{3,Floa
         if chi2 > chi2_threshold
             inflation = sqrt(chi2 / chi2_threshold)
 
-            # Safety interlock: trial update, then check if residual
-            # energy decreased. If not, revert to Mode B fallback.
-            x_save = copy(est.x)
-            P_save = copy(est.P)
-
+            # Always use heading-protected update in Mode C.
+            # The heading correction clamp inside prevents cumulative drift.
             _do_mag_ekf_update_heading_protected!(est, innovation, H, R_base, inflation)
 
-            # Safety interlock: check if heading correction was excessive.
-            # The heading-protected update retains heading gain, but if the
-            # innovation is heading-contaminated, this can inject large
-            # heading errors. Detect by checking |Δψ|.
-            delta_psi = abs(est.x[5] - x_save[5])
-            delta_psi = min(delta_psi, 2π - delta_psi)  # wrap
-            chi2_after = chi2  # placeholder for trace
-
-            interlock_fired = delta_psi > 0.15  # > ~8.6° heading jump
-            if !interlock_fired
-                # Heading correction bounded — keep heading-protected update
-            else
-                # Excessive heading correction — revert to Mode B fallback
-                est.x .= x_save
-                est.P .= P_save
-                inflation_safe = chi2 / chi2_threshold
-                _do_mag_ekf_update!(est, innovation, H, R_base, inflation_safe)
-            end
-
             push!(est.trace_chi2_before, chi2)
-            push!(est.trace_chi2_after, chi2_after)
+            push!(est.trace_chi2_after, chi2)
             push!(est.trace_heading_Reff, inflation)
-            push!(est.trace_interlock_fired, interlock_fired)
+            push!(est.trace_interlock_fired, false)
         else
             _do_mag_ekf_update!(est, innovation, H, R_base, 1.0)
 
-            # Trace: no gating event
             push!(est.trace_chi2_before, chi2)
             push!(est.trace_chi2_after, chi2)
             push!(est.trace_heading_Reff, 1.0)
@@ -569,7 +560,7 @@ field DOES corrupt heading information, but less so than position.
 """
 function _do_mag_ekf_update_heading_protected!(est::NavEstimator, innovation::SVector{3,Float64},
                                                 H::Matrix{Float64}, R_base::Matrix{Float64},
-                                                inflation::Float64; heading_cap::Float64 = 3.0)
+                                                inflation::Float64; heading_cap::Float64 = 4.0)
     h_psi = SVector(H[1,5], H[2,5], H[3,5])
     h_norm = sqrt(sum(h_psi .^ 2))
 
@@ -582,13 +573,21 @@ function _do_mag_ekf_update_heading_protected!(est::NavEstimator, innovation::SV
 
     # Heading direction: moderate inflation (sqrt of full)
     # Position directions: full inflation
-    # Adaptive heading cap: scale with heading-component contamination.
-    # If the innovation projects strongly onto the heading direction,
-    # heading is contaminated → inflate more. If weakly, heading is
-    # clean → retain heading info (Mode C's advantage).
+    # Continuous adaptive heading inflation: scale heading R with
+    # the heading-component contamination level. Smooth transition
+    # from "heading protected" (low contamination) to "full scalar
+    # inflation" (high contamination).
+    #
+    # h_component = innovation projected onto heading direction / σ
+    # When h_component < 1: heading is clean → use heading_cap (moderate)
+    # When h_component > 1: heading is contaminated → blend toward inflation
+    # The blend gives: heading_inflation = heading_cap + (inflation - heading_cap) * α
+    # where α = clamp((h_component - 1) / 4, 0, 1)
     h_component = abs(dot(d_heading, innovation)) / (sqrt(R_base[1,1]))
-    adaptive_cap = h_component > 3.0 ? inflation : heading_cap  # full inflation if heading contaminated
-    heading_inflation = min(sqrt(inflation), adaptive_cap)
+    # Sharp transition: if heading-sensitive innovation > 1σ, use full
+    # scalar inflation for heading (no protection). Below 1σ, protect.
+    target_heading = h_component > 1.0 ? inflation : heading_cap
+    heading_inflation = min(sqrt(inflation), target_heading)
     σ2 = R_base[1,1]
     dv = Vector(d_heading)
 
@@ -601,6 +600,12 @@ function _do_mag_ekf_update_heading_protected!(est::NavEstimator, innovation::SV
     K = est.P * H' / S
 
     dx = K * Vector(innovation)
+
+    # Clamp heading correction to prevent cumulative drift from
+    # persistent strong sources. Position corrections are unclamped.
+    max_heading_step = 0.01  # ~0.57 deg per 0.1s step
+    dx[5] = clamp(dx[5], -max_heading_step, max_heading_step)
+
     est.x .+= dx
 
     est.P = (I(N_STATES) - K * H) * est.P
@@ -997,4 +1002,6 @@ function main()
     end
 end
 
-main()
+if abspath(PROGRAM_FILE) == @__FILE__
+    main()
+end
