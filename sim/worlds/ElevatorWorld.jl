@@ -276,4 +276,55 @@ function create_default_elevator_world(;
     return ElevatorWorld(elevators, n_floors, floor_height, detection_range, rng, 0.0)
 end
 
+"""
+    create_doe_elevator_world(; speed, dwell_time, shaft_positions, dipole_moment,
+                                n_floors, floor_height, n_elevators, seed) -> ElevatorWorld
+
+DOE-parameterized constructor allowing explicit control of all DOE factors.
+
+# Keyword Arguments
+- `speed::Float64`: Max elevator velocity (m/s). Default 1.5.
+- `dwell_time::Float64`: Dwell time at each floor (s). Default 15.0.
+- `shaft_positions::Vector{SVector{2,Float64}}`: XY positions of shafts.
+- `dipole_moment::Float64`: Dipole moment magnitude (A·m²). Default 200.0.
+- `n_floors::Int`: Number of floors. Default 10.
+- `floor_height::Float64`: Floor-to-floor height (m). Default 3.5.
+- `detection_range::Float64`: Magnetic field cutoff (m). Default 20.0.
+- `seed::Int`: RNG seed. Default 42.
+- `frozen::Bool`: If true, elevators never move (control condition). Default false.
+"""
+function create_doe_elevator_world(;
+    speed::Float64 = 1.5,
+    dwell_time::Float64 = 15.0,
+    shaft_positions::Vector{SVector{2,Float64}} = [SVector(0.0, 0.0), SVector(4.0, 0.0)],
+    dipole_moment::Float64 = 200.0,
+    n_floors::Int = 10,
+    floor_height::Float64 = 3.5,
+    detection_range::Float64 = 20.0,
+    seed::Int = 42,
+    frozen::Bool = false,
+)
+    rng = MersenneTwister(seed)
+    elevators = ElevatorState[]
+
+    for shaft_xy in shaft_positions
+        dipole = SVector(0.0, 0.0, dipole_moment)
+        accel = 1.5
+        pos = SVector(shaft_xy[1], shaft_xy[2], 0.0)
+
+        # For frozen worlds, use effectively infinite dwell so elevator never moves
+        effective_dwell = frozen ? 1e12 : dwell_time
+
+        elev = ElevatorState(
+            pos, 0.0, 1, 1, STOPPED, dipole,
+            speed, accel, effective_dwell, effective_dwell, shaft_xy,
+        )
+        push!(elevators, elev)
+    end
+
+    return ElevatorWorld(elevators, n_floors, floor_height, detection_range, rng, 0.0)
+end
+
+export create_doe_elevator_world
+
 end # module ElevatorWorldModule

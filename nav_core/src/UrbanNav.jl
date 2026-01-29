@@ -225,6 +225,12 @@ include("testing/qualification_evidence.jl")
 include("testing/regression_suite.jl")
 include("testing/qualification_runner.jl")
 
+# Elevator DOE testing infrastructure
+include("testing/elevator_mode_config.jl")
+include("testing/elevator_doe_metrics.jl")
+include("testing/elevator_map_poisoning.jl")
+include("testing/elevator_doe.jl")
+
 # ============================================================================
 # Public API - the ONLY entry points for external code
 # ============================================================================
@@ -479,6 +485,25 @@ export compute_observability_metrics, is_observable
 export compute_performance_metrics, passes_performance
 export create_observability_doe, create_performance_doe
 export quick_observability_doe, comprehensive_observability_doe, lawnmower_observability_doe
+
+# Re-export Elevator DOE
+export ElevatorNavMode, NAV_MODE_A_BASELINE, NAV_MODE_B_ROBUST_IGNORE, NAV_MODE_C_SOURCE_AWARE
+export ElevatorModeConfig, configure_mode_a, configure_mode_b, configure_mode_c, configure_elevator_mode
+export ElevatorDOEMetrics, SegmentMetrics
+export compute_elevator_metrics, compute_segment_metrics
+export compute_do_no_harm, compute_map_contamination, compute_innovation_burst
+export MapPoisoningResult, run_map_poisoning_test
+export ElevatorSpeed, ELEV_SLOW, ELEV_MEDIUM, ELEV_FAST
+export StopFrequency, STOP_RARE, STOP_NORMAL, STOP_FREQUENT
+export ClosestApproach, APPROACH_NEAR, APPROACH_MEDIUM, APPROACH_FAR
+export DipoleStrength, DIPOLE_WEAK, DIPOLE_NOMINAL, DIPOLE_STRONG
+export ShaftGeometry, SHAFT_SINGLE, SHAFT_OFFSET, SHAFT_DUAL
+export TrajectoryRichness, RICHNESS_STRAIGHT, RICHNESS_L_TURNS, RICHNESS_LOOP
+export SensorNoiseScale, NOISE_HALF, NOISE_NOMINAL, NOISE_DOUBLE
+export ElevatorDOEPoint, ElevatorDOEDesign, ElevatorDOERun, ElevatorDOEResult
+export create_practical_first_doe, create_screening_doe
+export build_elevator_world, build_trajectory, build_control_world
+export run_elevator_doe!, run_single_point
 
 # Re-export Qualification Framework (Step 10)
 export QualificationMode, MODE_OBSERVABILITY, MODE_PERFORMANCE
