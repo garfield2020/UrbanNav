@@ -91,6 +91,9 @@ include("sensors/SensorRegistry.jl")
 # Sensor models (Odometry, Depth, FTM, IMU)
 include("sensors/sensors.jl")
 
+# Tetrahedral FTM sensor model (17-channel scalar Hall bar array)
+include(joinpath(@__DIR__, "..", "..", "sim", "sensors", "TetrahedronSensor.jl"))
+
 # ============================================================================
 # Factor graph engine
 # ============================================================================

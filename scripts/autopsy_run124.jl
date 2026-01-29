@@ -114,6 +114,7 @@ function run_autopsy()
     est.x[4] = start_vel[2]
 
     noise = SensorNoise(scale=1.0)
+    tetra_sensor = TetrahedronSensor(noise.tetra_config; seed=target_seed)
 
     # Introspection data
     println("TIMESTEP TRACE (filtered to high-chi² events):")
@@ -136,12 +137,28 @@ function run_autopsy()
         B_ned = B_static + B_elevator
         att = ElevatorDOETrajectories.attitude(traj, t)
         R_ned2body = att'
-        B_body = R_ned2body * B_ned
-        mag_meas = B_body + SVector(
-            noise.magnetometer * randn(rng),
-            noise.magnetometer * randn(rng),
-            noise.magnetometer * randn(rng),
+
+        # Tetrahedron sensor: evaluate field at each Hall bar position
+        field_at_sensor(r_sensor) = begin
+            world_offset = R_ned2body' * r_sensor
+            sensor_world_pos = pos + SVector(world_offset[1], world_offset[2], world_offset[3])
+            B_s = EARTH_FIELD_NED + static_background_field(sensor_world_pos) +
+                  magnetic_field(world2, sensor_world_pos) * 1e6
+            return R_ned2body * B_s * 1e-6  # µT → T
+        end
+        nav_bandwidth = 10.0
+        raw_17 = simulate_measurement(tetra_sensor, field_at_sensor;
+                                       add_noise=true, bandwidth_hz=nav_bandwidth)
+        recon = reconstruct_tensor(tetra_sensor, raw_17;
+                                   σ_meas=noise.σ_per_bar)
+        mag_meas_clean = SVector{3}(recon.B0) * 1e6
+        σ_env_µT = noise.σ_environmental * 1e6
+        mag_meas = mag_meas_clean + SVector(
+            σ_env_µT * randn(rng),
+            σ_env_µT * randn(rng),
+            σ_env_µT * randn(rng),
         )
+        fit_residual = recon.fit_residual_normalized
 
         gyro_true_yaw = if t > dt
             vel_prev = ElevatorDOETrajectories.velocity(traj, t - dt)
@@ -165,7 +182,8 @@ function run_autopsy()
         # Run estimator
         predict!(est, gyro_meas, dt)
         update_odometry!(est, speed_meas, noise.odometry)
-        update_magnetometer!(est, mag_meas, noise.magnetometer)
+        update_magnetometer!(est, mag_meas, noise.magnetometer;
+                              fit_residual=fit_residual)
 
         # Position error
         pos_err = sqrt((est.x[1] - pos[1])^2 + (est.x[2] - pos[2])^2)

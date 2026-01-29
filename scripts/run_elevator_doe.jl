@@ -20,6 +20,7 @@
 # Include simulation modules
 include(joinpath(@__DIR__, "..", "sim", "worlds", "ElevatorWorld.jl"))
 include(joinpath(@__DIR__, "..", "sim", "trajectories", "elevator_doe_trajectories.jl"))
+include(joinpath(@__DIR__, "..", "sim", "sensors", "TetrahedronSensor.jl"))
 include(joinpath(@__DIR__, "..", "reports", "elevator_doe_report.jl"))
 
 using .ElevatorWorldModule
@@ -48,16 +49,42 @@ const EARTH_FIELD_NED = SVector(22.0, 0.0, 43.3)  # µT, typical mid-latitude
 # ============================================================================
 
 struct SensorNoise
-    magnetometer::Float64   # σ per axis (µT)
+    tetra_config::TetrahedronConfig
+    σ_per_bar::Float64      # per-bar noise (T), from ASD * √BW
+    σ_reconstructed::Float64 # reconstructed B₀ noise (T), for EKF R matrix
+    σ_environmental::Float64 # urban environmental noise (T)
+    σ_total::Float64         # total magnetometer noise (T) = √(σ_reconstructed² + σ_environmental²)
+    magnetometer::Float64   # σ per axis (µT), for EKF R matrix (= σ_total in µT)
     imu_gyro::Float64       # σ yaw-rate (rad/s)
     odometry::Float64       # σ speed (m/s)
+    urban_env::UrbanNoiseEnvironment
 end
 
-function SensorNoise(; scale::Float64 = 1.0)
+function SensorNoise(; scale::Float64 = 1.0, nav_bandwidth::Float64 = 10.0)
+    config = TetrahedronConfig()
+    urban_env = UrbanNoiseEnvironment()
+
+    # Sensor noise: ASD × √BW for per-bar, then reconstruct via least-squares
+    σ_per_bar = noise_density(config) * sqrt(nav_bandwidth)      # ~15.8 nT at 10 Hz
+    σ_reconstructed = sensor_noise_floor(config; bandwidth_hz=nav_bandwidth)  # ~7.3 nT
+
+    # Environmental noise (RSS of urban sources)
+    σ_env = environmental_noise_std(urban_env) * scale  # ~122 nT, scaled by DOE factor
+
+    # Total noise per reconstructed B₀ axis
+    σ_total_T = sqrt(σ_reconstructed^2 + σ_env^2)  # ~122 nT (environmental dominates)
+    σ_total_µT = σ_total_T * 1e6                    # Convert to µT for EKF
+
     SensorNoise(
-        0.5 * scale,   # magnetometer σ (µT)
+        config,
+        σ_per_bar,
+        σ_reconstructed,
+        σ_env,
+        σ_total_T,
+        σ_total_µT,    # magnetometer σ (µT) — feeds into EKF R matrix
         1e-4 * scale,  # gyro σ (rad/s)
         0.02 * scale,  # odometry σ (m/s)
+        urban_env,
     )
 end
 
@@ -386,7 +413,7 @@ Mode-specific handling:
 - Mode C: CUSUM detection + heavy inflation during source events
 """
 function update_magnetometer!(est::NavEstimator, measured_B_body::SVector{3,Float64},
-                               noise_std::Float64)
+                               noise_std::Float64; fit_residual::Float64 = NaN)
     pos_xy = SVector(est.x[1], est.x[2])
     B_ned_map, dB_dxy = predict_field(est.mag_map, pos_xy)
 
@@ -462,7 +489,18 @@ function update_magnetometer!(est::NavEstimator, measured_B_body::SVector{3,Floa
         end
 
     elseif est.mode.mode == NAV_MODE_C_SOURCE_AWARE
-        # CUSUM on absolute field magnitude deviation
+        # Primary: physics-based near-field detection from tetrahedron fit residual.
+        # Fit residual > 3 indicates near-field source (9 DOF chi² test).
+        # More principled than magnitude-based CUSUM since it measures whether
+        # the field is consistent with a linear gradient model.
+        fit_residual_active = !isnan(fit_residual) && fit_residual > 3.0
+        if fit_residual_active
+            est.source_detected = true
+            idx = tile_index(est.mag_map, pos_xy)
+            push!(est.frozen_tiles, idx)
+        end
+
+        # Secondary: CUSUM on absolute field magnitude deviation (fallback)
         B_earth_mag = sqrt(sum(EARTH_FIELD_NED .^ 2))
         B_meas_mag = sqrt(sum(measured_B_body .^ 2))
         mag_dev = abs(B_meas_mag - B_earth_mag) / noise_std
@@ -475,7 +513,7 @@ function update_magnetometer!(est::NavEstimator, measured_B_body::SVector{3,Floa
             est.source_detected = true
             idx = tile_index(est.mag_map, pos_xy)
             push!(est.frozen_tiles, idx)
-        elseif est.cusum_stat < 0.5
+        elseif est.cusum_stat < 0.5 && !fit_residual_active
             est.source_detected = false
         end
 
@@ -700,6 +738,9 @@ function run_nav_mission(world, trajectory, mode_config;
     dur = ElevatorDOETrajectories.duration(trajectory)
     n_steps = max(1, floor(Int, dur / dt) + 1)
 
+    # --- Create tetrahedron sensor ---
+    tetra_sensor = TetrahedronSensor(sensor_noise.tetra_config; seed=seed)
+
     # --- Build magnetic map from static background ---
     # Simulates a previously-learned map (before elevator was active).
     # The map captures the persistent field the estimator can anchor to.
@@ -753,16 +794,44 @@ function run_nav_mission(world, trajectory, mode_config;
 
         # --- Generate noisy sensor measurements ---
 
-        # Magnetometer: measures B in BODY frame (not tilt-compensated).
+        # Magnetometer: tetrahedral FTM sensor in BODY frame.
         # Heading information is preserved in the body-frame measurement.
         att = ElevatorDOETrajectories.attitude(trajectory, t)
         R_ned2body = att'
-        B_body = R_ned2body * B_ned
-        mag_meas = B_body + SVector(
-            sensor_noise.magnetometer * randn(rng),
-            sensor_noise.magnetometer * randn(rng),
-            sensor_noise.magnetometer * randn(rng),
+
+        # Create field function at pedestrian position for tetrahedron.
+        # Evaluate the total field (Earth + static + elevator) at each of the
+        # 17 Hall bar positions relative to the sensor center. The field is
+        # evaluated at pos + r_sensor (world coords), then rotated to body frame.
+        # At urban scales the 150mm sensor baseline resolves near-field gradients
+        # (e.g. elevator at 1m) while far-field sources appear uniform.
+        field_at_sensor(r_sensor) = begin
+            # World position of this Hall bar
+            world_offset = R_ned2body' * r_sensor  # body → NED
+            sensor_world_pos = pos + SVector(world_offset[1], world_offset[2], world_offset[3])
+            # Total field at that world position (µT)
+            B_s = EARTH_FIELD_NED + static_background_field(sensor_world_pos) +
+                  magnetic_field(world, sensor_world_pos) * 1e6
+            # Rotate to body frame (T) — sensor works in Tesla internally
+            return R_ned2body * B_s * 1e-6  # µT → T
+        end
+        nav_bandwidth = 10.0  # Hz
+        raw_17 = simulate_measurement(tetra_sensor, field_at_sensor;
+                                       add_noise=true, bandwidth_hz=nav_bandwidth)
+        recon = reconstruct_tensor(tetra_sensor, raw_17;
+                                   σ_meas=sensor_noise.σ_per_bar)
+
+        # Reconstructed B₀ in body frame (T → µT for EKF)
+        mag_meas_clean = SVector{3}(recon.B0) * 1e6  # T → µT
+
+        # Add environmental noise (urban EMI not captured by sensor model)
+        σ_env_µT = sensor_noise.σ_environmental * 1e6
+        mag_meas = mag_meas_clean + SVector(
+            σ_env_µT * randn(rng),
+            σ_env_µT * randn(rng),
+            σ_env_µT * randn(rng),
         )
+        fit_residual = recon.fit_residual_normalized  # for Mode C source detection
 
         # Gyroscope: true yaw rate from heading change
         gyro_true_yaw = if t > dt
@@ -795,7 +864,8 @@ function run_nav_mission(world, trajectory, mode_config;
 
         # 3. Magnetometer: map-relative position correction
         est_pos_sv = SVector(est.x[1], est.x[2], 0.0)
-        update_magnetometer!(est, mag_meas, sensor_noise.magnetometer)
+        update_magnetometer!(est, mag_meas, sensor_noise.magnetometer;
+                              fit_residual=fit_residual)
 
         # Heading is observable through the body-frame mag update:
         # H[1:2, 5] couples heading to B_body via dR/dψ * B_ned.
