@@ -55,13 +55,15 @@ end
 Generate a summary row for one mode.
 """
 function _mode_summary(results::Vector, mode_name::String)
-    isempty(results) && return "| $mode_name | - | - | - | - | - |\n"
+    isempty(results) && return "| $mode_name | - | - | - | - | - | - |\n"
 
+    rmses = [r.metrics.rmse for r in results]
     p90s = [r.metrics.p90_error for r in results]
     dnhs = [r.metrics.do_no_harm_ratio for r in results]
     pass_rate = count(r -> r.pass, results) / length(results) * 100.0
 
-    return "| $mode_name | $(length(results)) | $(round(mean(p90s), digits=3)) | " *
+    return "| $mode_name | $(length(results)) | $(round(mean(rmses), digits=3)) | " *
+           "$(round(mean(p90s), digits=3)) | " *
            "$(round(maximum(p90s), digits=3)) | $(round(mean(dnhs), digits=3)) | " *
            "$(round(pass_rate, digits=1))% |\n"
 end
@@ -86,8 +88,8 @@ function export_elevator_report_md(report::ElevatorDOEReport, path::String)
     # Mode comparison table
     push!(lines, "## Mode Comparison (A vs B vs C)")
     push!(lines, "")
-    push!(lines, "| Mode | Runs | Mean P90 (m) | Max P90 (m) | Mean DNH Ratio | Pass Rate |")
-    push!(lines, "|------|------|-------------|-------------|----------------|-----------|")
+    push!(lines, "| Mode | Runs | Mean RMSE (m) | Mean P90 (m) | Max P90 (m) | Mean DNH Ratio | Pass Rate |")
+    push!(lines, "|------|------|--------------|-------------|-------------|----------------|-----------|")
     push!(lines, _mode_summary(report.mode_a_results, "A (Baseline)"))
     push!(lines, _mode_summary(report.mode_b_results, "B (Robust Ignore)"))
     push!(lines, _mode_summary(report.mode_c_results, "C (Source-Aware)"))

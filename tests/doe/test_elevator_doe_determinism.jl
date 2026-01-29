@@ -21,7 +21,7 @@ include(joinpath(@__DIR__, "..", "..", "nav_core", "src", "testing", "elevator_d
 function det_run_mission(world, trajectory, mode_config; seed::Int = 42)
     rng = MersenneTwister(seed)
     dt = 0.1
-    dur = duration(trajectory)
+    dur = ElevatorDOETrajectories.duration(trajectory)
     n_steps = max(1, floor(Int, dur / dt) + 1)
 
     true_pos = SVector{3,Float64}[]
@@ -29,7 +29,7 @@ function det_run_mission(world, trajectory, mode_config; seed::Int = 42)
 
     for i in 1:n_steps
         t = (i - 1) * dt
-        pos = position(trajectory, t)
+        pos = ElevatorDOETrajectories.position(trajectory, t)
         push!(true_pos, pos)
         if i > 1
             step!(world, dt)

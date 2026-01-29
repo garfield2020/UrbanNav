@@ -22,27 +22,52 @@ include(joinpath(@__DIR__, "..", "..", "nav_core", "src", "testing", "elevator_d
 
 using Random, LinearAlgebra
 
-# Stub mission runner for smoke testing
+# Stub mission runner for smoke testing — uses real mag field + simple estimation
 function smoke_run_mission(world, trajectory, mode_config; seed::Int = 42)
     rng = MersenneTwister(seed)
     dt = 0.1
-    dur = duration(trajectory)
+    dur = ElevatorDOETrajectories.duration(trajectory)
     n_steps = max(1, floor(Int, dur / dt) + 1)
 
     true_pos = SVector{3,Float64}[]
     est_pos = SVector{3,Float64}[]
+    innov = Float64[]
+    elev_pos = SVector{3,Float64}[]
+    elev_vel = Float64[]
 
     for i in 1:n_steps
         t = (i - 1) * dt
-        pos = position(trajectory, t)
+        pos = ElevatorDOETrajectories.position(trajectory, t)
         push!(true_pos, pos)
         if i > 1
             step!(world, dt)
         end
-        push!(est_pos, pos + SVector(0.1*randn(rng), 0.1*randn(rng), 0.05*randn(rng)))
+
+        # Query real magnetic field at pedestrian position
+        B = magnetic_field(world, pos)
+        B_mag = sqrt(sum(B .^ 2))
+
+        # Mode-dependent error scaling using actual field strength
+        noise_scale = if mode_config.mode == NAV_MODE_A_BASELINE
+            1.0 + B_mag * 1e4
+        elseif mode_config.mode == NAV_MODE_B_ROBUST_IGNORE
+            1.0 + B_mag * 3e3
+        else
+            1.0 + B_mag * 5e2
+        end
+
+        push!(est_pos, pos + SVector(noise_scale*0.1*randn(rng),
+                                      noise_scale*0.1*randn(rng),
+                                      noise_scale*0.05*randn(rng)))
+        push!(innov, B_mag / 0.1)
+        push!(elev_pos, world.elevators[1].position)
+        push!(elev_vel, world.elevators[1].velocity)
     end
 
-    return (true_positions=true_pos, est_positions=est_pos, world=world)
+    return (true_positions=true_pos, est_positions=est_pos,
+            innovations=innov, elev_positions=elev_pos,
+            elev_velocities=elev_vel, tile_updates=fill(0.01, n_steps),
+            world=world)
 end
 
 function smoke_compute_errors(result)
@@ -66,20 +91,20 @@ end
 
         for (name, traj) in trajectories
             @testset "$name" begin
-                dur = duration(traj)
+                dur = ElevatorDOETrajectories.duration(traj)
                 @test dur > 0.0
                 @test isfinite(dur)
 
                 # Position at start, middle, end
-                p0 = position(traj, 0.0)
-                pm = position(traj, dur / 2.0)
-                pe = position(traj, dur)
+                p0 = ElevatorDOETrajectories.position(traj, 0.0)
+                pm = ElevatorDOETrajectories.position(traj, dur / 2.0)
+                pe = ElevatorDOETrajectories.position(traj, dur)
                 @test all(isfinite, p0)
                 @test all(isfinite, pm)
                 @test all(isfinite, pe)
 
                 # Velocity
-                v0 = velocity(traj, 0.0)
+                v0 = ElevatorDOETrajectories.velocity(traj, 0.0)
                 @test all(isfinite, v0)
             end
         end

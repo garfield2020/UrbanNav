@@ -24,6 +24,7 @@ using Statistics
 Position error and diagnostic metrics for an elevator DOE run.
 
 # Fields
+- `rmse::Float64`: Root mean square position error (m).
 - `p50_error::Float64`: Median position error (m).
 - `p90_error::Float64`: 90th-percentile position error (m).
 - `max_error::Float64`: Maximum position error (m).
@@ -33,6 +34,7 @@ Position error and diagnostic metrics for an elevator DOE run.
 - `false_source_count_per_km::Float64`: Spurious source detections per km walked.
 """
 struct ElevatorDOEMetrics
+    rmse::Float64
     p50_error::Float64
     p90_error::Float64
     max_error::Float64
@@ -108,6 +110,7 @@ function compute_elevator_metrics(
     false_source_count::Int = 0,
 )
     sorted_errors = sort(position_errors)
+    rmse = isempty(position_errors) ? 0.0 : sqrt(mean(position_errors .^ 2))
     p50 = _quantile_sorted(sorted_errors, 0.5)
     p90 = _quantile_sorted(sorted_errors, 0.9)
     max_err = isempty(sorted_errors) ? 0.0 : sorted_errors[end]
@@ -117,7 +120,7 @@ function compute_elevator_metrics(
     false_per_km = path_length > 0 ? false_source_count / (path_length / 1000.0) : 0.0
 
     return ElevatorDOEMetrics(
-        p50, p90, max_err, do_no_harm_ratio,
+        rmse, p50, p90, max_err, do_no_harm_ratio,
         burst_peak, contamination, false_per_km,
     )
 end
@@ -186,7 +189,7 @@ function compute_segment_metrics(
     _make = (mask) -> begin
         idx = findall(mask)
         if isempty(idx)
-            return ElevatorDOEMetrics(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+            return ElevatorDOEMetrics(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
         end
         pe = position_errors[idx]
         inn = !isempty(innovations) ? innovations[clamp.(idx, 1, length(innovations))] : Float64[]

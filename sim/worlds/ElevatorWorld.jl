@@ -5,7 +5,8 @@ using Random
 using LinearAlgebra: dot
 
 export ElevatorWorld, ElevatorState, ElevatorPhase,
-       step!, magnetic_field, create_default_elevator_world
+       step!, magnetic_field, create_default_elevator_world,
+       source_positions, source_moments
 
 # Physical constants
 const μ₀_over_4π = 1e-7  # μ₀/(4π) in T·m/A
@@ -274,6 +275,24 @@ function create_default_elevator_world(;
     end
 
     return ElevatorWorld(elevators, n_floors, floor_height, detection_range, rng, 0.0)
+end
+
+"""
+    source_positions(world::ElevatorWorld) -> Vector{SVector{3,Float64}}
+
+Return current 3D positions of all elevator sources.
+"""
+function source_positions(world::ElevatorWorld)
+    return [e.position for e in world.elevators]
+end
+
+"""
+    source_moments(world::ElevatorWorld) -> Vector{SVector{3,Float64}}
+
+Return magnetic dipole moments of all elevator sources.
+"""
+function source_moments(world::ElevatorWorld)
+    return [e.dipole_moment for e in world.elevators]
 end
 
 """

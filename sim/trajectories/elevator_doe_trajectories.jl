@@ -511,4 +511,40 @@ function velocity(traj::DualShaftPath, t::Float64)::SVector{3,Float64}
     return zero3
 end
 
+# ============================================================================
+# Attitude helpers (required by mission runner)
+# ============================================================================
+
+"""
+    attitude(traj::AbstractTrajectory, t) -> SMatrix{3,3,Float64,9}
+
+Compute body-to-NED DCM from velocity direction. Heading follows velocity
+vector; when stationary, maintain identity orientation.
+"""
+function attitude(traj::AbstractTrajectory, t::Float64)
+    vel = velocity(traj, t)
+    speed = sqrt(vel[1]^2 + vel[2]^2)
+
+    if speed > 0.01
+        # Heading from velocity in NED frame
+        yaw = atan(vel[2], vel[1])
+        # Simple yaw-only rotation (pedestrian, no pitch/roll)
+        cy, sy = cos(yaw), sin(yaw)
+        return SMatrix{3,3,Float64,9}(
+            cy, sy, 0.0,
+            -sy, cy, 0.0,
+            0.0, 0.0, 1.0
+        )
+    else
+        # Stationary — identity
+        return SMatrix{3,3,Float64,9}(
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0
+        )
+    end
+end
+
+export attitude
+
 end # module ElevatorDOETrajectories
